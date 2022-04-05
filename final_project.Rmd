@@ -1,0 +1,782 @@
+---
+title: "Viz_Final_Project"
+author: "Ivan Aguilar"
+date: "2022-MAR-28"
+output: 
+  html_document:
+    toc: true
+    toc_depth: 3
+    number_sections: false
+---
+
+```{r setup, include=FALSE}
+rm(list=ls())
+knitr::opts_chunk$set(echo = TRUE, cache = FALSE, message=FALSE, warning=FALSE)
+set.seed(666)
+```
+
+# Description
+For your final project you are asked to analyse UK house price data from the Land Registry [1,2]. 
+The entire dataset (4 Gb), a subset of the dataset [3] (if you cannot process the entire 4 Gb dataset), and a description of the columns are also available here [4]. See also attached "starting-script.r".
+The exercise is divided into the following tasks:
+
+Task A:
+
+A1. For the 33 London boroughs create a box-plot (or several box-plots) that compares house prices between the boroughs. Can you think of a better way to compare borough house prices (please demonstrate)?
+
+A2. Could the entire dataset be used to estimate the relationship between price of flats and floor level? If yes, how would you show that relationship in a plot?
+
+Task B:
+
+B1. Create a GeoJSON file where each postcode is represented with a latitude, longitude value, together with minimum, maximum, mean and median house price.
+
+B2. Open the GeoJSON file in the GIS application of your choice and colour-code the data to give an overview of areas with high, medium and low median house price. Additionally, you can visualise this information as cloropleths or use shiny and add the information as markers on a map for a more interactive and impressive result.
+
+B3. Instead of using median price, you could have been asked to colour-code the mean house price. Would that have given a better view of the house prices across the UK? Please justify your answer.
+
+Task C:
+
+C1. Examine the house prices for 2015. How do these change over time? Do property prices seem to increase or decrease throughout the year?
+
+C2. Is there a significant relationship between the price of a property and the time of year it is sold? Does this vary with type of property?
+
+# Solution:
+We first load the libraries we will be using during the exercise
+
+```{r}
+# Load libraries
+library(Hmisc, quietly=TRUE)
+library(dplyr, quietly=TRUE)
+library(ggplot2, quietly=TRUE)
+library(scales, quietly=TRUE)
+library(maps, quietly = TRUE)
+library(leaflet, quietly = TRUE)
+library(sp, quietly = TRUE)
+library(maptools, quietly = TRUE)
+library(mapdata, quietly = TRUE)
+library(geojsonio, quietly = TRUE)
+library(spdplyr, quietly = TRUE)
+library(stringr, quietly = TRUE)
+library(dygraphs, quietly = TRUE)
+library(xts, quietly = TRUE)
+library(viridis, quietly = TRUE)
+library(leaflet, quietly = TRUE)
+library(htmlwidgets, quietly = TRUE)
+library(IRdisplay, quietly = TRUE)
+library(gridExtra, quietly = TRUE)
+library(RColorBrewer, quietly = TRUE)
+```
+
+And load the two files we will require: ppdata and ukpostcodes. We will be using the lite version of the ppdata to improve the perfomance on this exercise
+
+NOTE: The following chunk only needs to be executed the first time. After that we will be loading the rds data file produced from reading the files and joining them together. 
+
+```{r}
+# Load price paid data.
+#load("data/ppdata")
+#ppdata <- read.csv("data/ppdata_lite.csv", header = TRUE, sep = ',')
+
+# Load file with postcodes and latitude/longitude
+#ukpostcodes <- read.csv("data/ukpostcodes.csv", header = TRUE, sep = ',')
+
+# Merge postcodes and ppdata
+#ppdata <- merge(ppdata, ukpostcodes, by = "postcode")
+
+# Save a single object to a file
+#saveRDS(ppdata, "ppdata.rds")
+
+```
+
+```{r}
+# Reload the data from saved rds file
+ppdata <- readRDS("ppdata.rds")
+```
+
+```{r}
+# display preview of the joined data
+head(ppdata,10)
+```
+
+To understand better the dataset we print out a description of the entire dataset using the hmisc library. The output gives us valuable information that we will use throughout the exercise. 
+
+Some things that initially stand out are:
+- quite a large number of observations (>2M) it will be interesting how the graph perfoms with the raw data
+- there are some variables that have some missing values, we will need to be aware of those during the exercise
+- There is definitely some outliers in the price feature, we will decide how to treat them depending on the case
+
+```{r}
+# Run a full description of the dataset
+describe(ppdata)
+```
+
+## Task A1
+A1. For the 33 London boroughs create a box-plot (or several box-plots) that compares house prices between the boroughs. Can you think of a better way to compare borough house prices (please demonstrate)?
+
+We believe that the boroughs refer to the district column in the dataset, so to be sure, we filter the dataset by the city of london and verify the count of different districts we have. 
+
+```{r}
+# Select only london city and print out the unique number of districts
+london_ppdata0 = ppdata %>% filter(town_city=='LONDON')
+length(unique(london_ppdata0$district))
+```
+
+The number 33 confirms our earlier suspicion so now we will try to create the boxplot as required by the question.
+
+
+```{r, fig.width=12,fig.height=7}
+london_ppgraph0 = ggplot(data=london_ppdata0, aes(x=district, y=price)) +
+  labs(x = 'District / Borough', y = 'Price', title = 'London house log(price) by district') +
+  geom_boxplot() + 
+  theme(axis.text.x = element_text(angle = -90, vjust = 1, hjust = 0), legend.position = 'bottom') + 
+  scale_y_continuous(labels = comma)
+
+london_ppgraph0
+```
+
+In the above boxplot graph we see a very strange spread on price values, which causes the boxplots to be basically invisible, probably caused per the existence of very extremely high price values (potential outliers). 
+
+To try to avoid this we will apply a log conversion to the price value to better visualize the details of the boxplot graphic
+
+```{r, fig.width=12,fig.height=7}
+london_ppgraph1 = ggplot(data=london_ppdata0, aes(x=district, y=price)) +
+  labs(x = 'District / Borough', y = 'Log(Price)', title = 'London house log(price) by district') +
+  geom_boxplot() + 
+  theme(axis.text.x = element_text(angle = -90, vjust = 1, hjust = 0), legend.position = 'bottom') +
+  scale_y_log10(labels = comma)
+
+london_ppgraph1
+```
+
+Still we see some lower price outliers, under 100 of price value. Since they are very few values and they are outstandingly low, we will remove those values to improve our visualization as well. This action of truncating n-highest and n-lowest values before assessing a mean of a given variable is called trimmed mean estimation.  
+
+We will also be creating a new summarized table with the number of observations, as we see some districts with low numbers there and for which we should take their means with more discretion.
+
+Additionally it could be useful for later to know the mean price (without the log) to understand the real value of the house better, so we will print it as an annotation on the graph for each district. 
+
+Finally given that we have quite a few districts the visualization would benefit from displaying it horizontally and sorted by price mean(not log) in descending order.
+
+```{r}
+# Remove lower outliers
+london_ppdata1 = ppdata %>% 
+  filter(town_city=='LONDON' & price>100)
+
+# Add count of observations per district
+london_ppdata_count = london_ppdata1 %>% 
+  group_by(town_city, district) %>% 
+  dplyr::summarize(n=n(), mean_price=mean(price), median_price = median(price), .groups='keep')
+```
+
+```{r, fig.width=12,fig.height=7}
+# reorder the district by highest median
+london_ppdata1$district = with(london_ppdata1, reorder(district, price, median))
+
+london_ppgraph2 = ggplot(data=london_ppdata1, aes(x=district, y=price)) +
+  labs(x = 'District / Borough', y = 'Log(median price)', title = 'London house log(median price) by district') +
+  geom_boxplot() +
+  geom_text(data = london_ppdata_count, aes(y = 10, label = n), size =2) +
+  geom_text(data = london_ppdata_count, aes(y = 20, label = paste0(round(median_price/1000,0),'K')), size =2, color='red') +
+  theme(axis.text.x = element_text(angle = -90, vjust = 1, hjust = 0), legend.position = 'bottom') +
+  scale_y_log10(labels = comma)+
+  coord_flip()
+
+london_ppgraph2
+```
+
+Another way to show this information would be to use a scatter plot and using color scaling. For this we will need to generate our own custom palette as we require as many as 33 colors.
+
+```{r, fig.width=12,fig.height=7}
+# create custom palette based on number of districts to graph
+colorCount = length(unique(london_ppdata1$district))
+getPalette = colorRampPalette(brewer.pal(9,"RdYlBu"))
+
+london_ppgraph3 = ggplot(data=london_ppdata1, aes(x=district, y=price, col=district)) +
+  labs(x = 'District / Borough', y = 'Log(Price)', title = 'London house log(price) by district') +
+  geom_jitter(size = 0.5) + 
+  scale_color_manual(values=getPalette(colorCount)) +
+  stat_summary(geom = 'point', fun= 'median', color = 'red', size = 1, alpha=0.8) +
+  geom_text(data = london_ppdata_count, aes(y = 101, label = n), size =2, color='black') +
+  geom_text(data = london_ppdata_count, aes(y = 201, label = paste0(round(median_price/1000,0),'K')), size =2, color='red') +
+  theme(axis.text.x = element_text(angle = -90, vjust = 1, hjust = 0), legend.position = 'none') +
+  scale_y_log10(labels = comma, limits = c(100,1e8))+
+  coord_flip()
+  
+london_ppgraph3
+```
+
+Even though there are many district values faceting could give us additional insight into each of them.
+
+```{r, fig.width=20,fig.height=10}
+london_ppgraph3 = ggplot(data=london_ppdata1, aes(x='', y=price) ) +
+  labs(x = 'District / Borough', y = 'Log(Price)', title = 'London house log(price) by district') +
+  geom_boxplot(alpha=0.1) +
+  stat_summary(geom = 'point', fun= 'median', color = 'red', size = 1, alpha=0.8) +
+  geom_text(data = london_ppdata_count, aes(y = 101, label = n), size=3) +
+  geom_text(data = london_ppdata_count, aes(y = 201, label = paste0(round(median_price/1000,0),'K')), size=3, color='red') +
+  theme(axis.text.x = element_text(angle = -90, vjust = 1, hjust = 0), legend.position = 'bottom') +
+  scale_y_log10(labels = comma, limits = c(100,1e8)) +
+  facet_wrap(~district, drop=FALSE, nrow=1, ncol=33)
+  
+london_ppgraph3
+```
+
+Faceting doesn't look very good. It complicates the comparison and ordering by the mean value becomes more challenging it will not be a preferred option. We will keep as the best option the previous version with the point jitter and color scaling.
+
+## Task A2
+A2. Could the entire dataset be used to estimate the relationship between price of flats and floor level? If yes, how would you show that relationship in a plot?
+
+The only possible floor level information seems to be contained in the SAON(Secondary addresable object name) column. But the entire dataset can't be used because the floor is not always present and in general the information on that column doesn't seem very consistent.
+
+Let's analyze a sample of what values we have in that column:
+
+```{r}
+head(unique(ppdata$SAON),100)
+```
+
+```{r}
+tail(unique(ppdata$SAON),100)
+```
+Also we can check if there are NA or empty strings
+
+```{r}
+saon_total = nrow(ppdata)
+# check for NA
+saon_na = ppdata %>% filter(is.na(SAON)) %>% dplyr::summarise(n=n())
+saon_na = saon_na/saon_total*100
+# check for empty strings
+saon_empty = ppdata %>% filter(SAON=='') %>% dplyr::summarise(n=n())
+saon_empty = saon_empty/saon_total*100
+
+print(paste0('% of NAs: ', saon_na))
+print(paste0('% of empty strings: ', saon_empty))
+
+```
+
+Given that the data is very inconsistent and that the number of empty strings is very high, we can conclude it is not possible to graph a consistent comparison between price and floor level with the full dataset.
+
+## Task B1
+B1. Create a GeoJSON file where each postcode is represented with a latitude, longitude value, together with minimum, maximum, mean and median house price
+
+First we create a new version of the original data, only containing the requested features, this will speed up the process of converting the file later.
+
+```{r}
+ppdata_geojson = ppdata %>% 
+  group_by(postcode, latitude, longitude) %>% 
+  dplyr::summarise(max_price=max(price),min_price=min(price),mean_price=mean(price),median_price=median(price), .groups ='keep')
+
+head(ppdata_geojson)
+```
+
+And now we convert the resulting dataframe to an Spatial object and write out the GeoJSON file
+
+```{r}
+# convert longitude and latitude fields to coordinates
+coordinates(ppdata_geojson) = c('latitude', 'longitude')
+
+# check if the geojson file already exists and delete. 
+# without this prior steps the writeOGR will fail if file already exists.
+fn <- 'output.geojson'
+if (file.exists(fn)) {
+  file.remove(fn)
+}
+
+# write geojson file
+rgdal::writeOGR(ppdata_geojson, "output.geojson", layer = "postcodes", driver = "GeoJSON")
+```
+
+## Task B2
+Open the GeoJSON file in the GIS application of your choice and colour-code the data to give an overview of areas with high, medium and low median house price. Additionally, you can visualise this information as cloropleths or use shiny and add the information as markers on a map for a more interactive and impressive result.
+
+We will not be using the GeoJSON file we generated. Instead we will work with the initial ppdata dataset and a newly imported shape file that contains the polygons of all UK area codes. 
+
+The shapefile was obtained from this url: https://www.opendoorlogistics.com/downloads/
+
+The reason we are using this file instead of the one provided is that the shapefile contains the polygon data and ids that resemble (but not entirely as explained below) the postcodes provided originally.
+
+First we do some maintenance by adding a new column to the original dataset based on the original postcode column but this one will only contain the characters up to the first space in the postcode string (which we believe correspond to the area code in the UK). This will be our new dataset id.  We will also rename both postcode and id columns for convenience.
+
+```{r}
+# Rename columns to reflect new id and postcode data
+ppdata = rename(ppdata, long_postcode = postcode)
+ppdata = rename(ppdata, old_id = id)
+
+ppdata = ppdata %>% 
+  mutate(id=str_split_fixed(long_postcode,' ',2)[,1])
+
+head(ppdata)
+```
+
+We will now do another aggregated dataset at short_postcode(area code) level and calculate the mean and median price. This dataset will be later joined with a newly imported shape file at area code level.
+
+```{r}
+# aggregate data at district (id) level
+ppdata_agg = ppdata %>% 
+  group_by(id) %>% 
+  dplyr::summarise(mean_price=mean(price),median_price=median(price), .groups ='keep')
+```
+
+Before we continue let's have a look at the distribution of the mean price. 
+
+Based on what we saw on the first part of the exercise there were some considerable outliers in the data so it might be relevant to reduce the impact of those outliers by creating bins based on the median price. Later on we will check which visualization provides better insights. 
+
+```{r, fig.width=20,fig.height=10}
+# plot distribution of the mean price with a histogram 
+plot_median_dist = ggplot(ppdata_agg, aes(x=log(median_price), fill = ..count..)) +
+  labs(x = 'log median price', y = 'Count', title = 'UK house log median price distribution at district aggregation') +
+  geom_histogram( bins=200) +
+  theme(axis.text.x = element_text(vjust = 1, hjust = 0), legend.position = 'right')
+
+# plot distribution of the mean price with a histogram 
+plot_mean_dist = ggplot(ppdata_agg, aes(x=log(mean_price), fill = ..count..)) +
+  labs(x = 'log mean price', y = 'Count', title = 'UK house log mean price distribution at district aggregation') +
+  geom_histogram( bins=200) +
+  theme(axis.text.x = element_text(vjust = 1, hjust = 0), legend.position = 'right')
+
+grid.arrange(plot_median_dist, plot_mean_dist, nrow=2)
+```
+
+We can see the heavy tail to the right and also how the counts are highly concentrated in the middle of the distribution (even more with the log applied). This confirms the bining could be beneficial.
+
+But how many bins should we create?. Let's have a look at the quantiles and create bins for each quantile or half quantile.
+
+```{r}
+# display quantile information
+summary(ppdata_agg$mean_price)
+```
+
+Seems like half a quantile would give us a good spread, so let's create the bins for both mean and median and add them to our aggregated dataframe.
+
+```{r}
+# create bins for mean and median price
+ppdata_agg = ppdata_agg %>% 
+  mutate(mean_price_bins = cut(mean_price, breaks=c(-Inf, 50000,100000,125000,150000,175000,200000,Inf), labels=c('0-50K','50K-125K','100K-125K','125K-150K','150K-175K','175K-200K','200K+'))) %>% 
+  mutate(median_price_bins = cut(median_price, breaks=c(-Inf, 50000,100000,125000,150000,175000,200000,Inf), labels=c('0-50K','50K-125K','100K-125K','125K-150K','150K-175K','175K-200K','200K+')))
+head(ppdata_agg)
+```
+
+So now we read a shape file containing the polygons at UK area code level and process the shape file so it can be used as a map in ggplot.
+
+```{r}
+# read shape file and flatten it, using the name attribute in it as region id
+uk_sh = rgdal::readOGR('./shape_data/Distribution/Districts.shp')
+uk_map = fortify(uk_sh, region='name')
+```
+
+For ggplot to accept the dataframe as a polygon map we also need to rename the longitude an latitude columns.
+
+```{r}
+# rename longitude and latitude fields to fit ggplot format for polygon maps
+uk_map = rename(uk_map, x=long)
+uk_map = rename(uk_map, y=lat)
+head(uk_map)
+```
+
+And now we can finally join the aggregated data with the dataframe from the shape file. We will do a left outer join to ensure we don't miss any area codes, even if there is no house price data for them.
+
+```{r}
+# join polygon dataframe with aggregated data
+uk_map = dplyr::left_join(uk_map, ppdata_agg, by='id')
+```
+
+If we now check the results of the left join by looking at na values on the dataset we find there are some area codes that did not have any information of house prices. 
+
+```{r}
+# check all fields on aggregated data for NAs and count them
+sapply(uk_map, function(x) sum(is.na(x)))
+```
+But since we have our new map ready with all information we can check that directly in the map. 
+
+We will show a map with area code administrative divisions and color coding depending on the log of the house price median. We use the log again to accentuate the differences between the different areas, otherwise they will all be shown with the same color. Both versions of the graphs are shown below.  
+
+```{r, fig.width=14,fig.height=10}
+plot_median = ggplot(uk_map) +
+  ggtitle("UK house median price (lighter color == lower price)", subtitle = 'by districts') +
+  geom_polygon(aes(x=x, y=y, fill = median_price , group=group), color = 'gray', size = 0.1) +
+  scale_fill_distiller(name='mean', palette='Spectral', breaks=pretty_breaks(n=10), label=comma) +
+  coord_quickmap() +
+  guides(fill=guide_legend(title='Median Price')) +
+  theme_void()
+
+plot_log_median = ggplot(uk_map) +
+  ggtitle("UK house median log(price) (lighter color == lower price)", subtitle = 'by districts') +
+  geom_polygon(aes(x=x, y=y, fill = log(median_price) , group=group), color = 'gray', size = 0.1) +
+  scale_fill_distiller(name='mean', palette='Spectral', breaks=pretty_breaks(n=10)) +
+  coord_quickmap() +
+  guides(fill=guide_legend(title='Median Log(Price)')) + 
+  theme_void()
+
+grid.arrange(plot_median, plot_log_median, ncol=2)
+```
+
+The results are acceptable but as we suspected the values are highly concentrated on a very small range compared to the high and max values, therefore is difficult to discern any differences between the area code districts, even in the log(price) version
+
+Then let's redo this again but this time using the median price bins we created based on quantile data.
+
+```{r, fig.width=7,fig.height=10}
+plot_median = ggplot(uk_map) +
+  ggtitle("UK house median price (lighter color == lower price)", subtitle = 'by districts') +
+  geom_polygon(aes(x=x, y=y, fill = median_price_bins , group=group), color = 'gray', size = 0.1) +
+  scale_fill_manual(values = c('yellow1','yellow3', 'orange1','orange2','orange3', 'red1', 'red3','gray')) +
+  scale_size_area() +
+  coord_quickmap() +
+  theme(legend.position='bottom') +
+  guides(fill=guide_legend(title="Median Price")) +
+  theme_void()
+
+plot_median
+  
+```
+
+It looks much better and it is far better to differentiate. 
+
+One more things we could improve is to crop the map, leaving out the portion we detected we were missing after our join, which is not part of our house prices dataset (gray color).
+
+```{r, fig.width=8,fig.height=7}
+plot_median = ggplot(uk_map) +
+  ggtitle("UK house median price (lighter color == lower price)", subtitle = 'by districts') +
+  geom_polygon(aes(x=x, y=y, fill = median_price_bins , group=group), color = 'gray', size = 0.1) +
+  scale_fill_manual(values = c('yellow1','yellow3', 'orange1','orange2','orange3', 'red1', 'red3','gray')) +
+  coord_quickmap(ylim=c(50.18,55.66),xlim=c(-7.26,2.11)) +
+  theme(legend.position='bottom') +
+  guides(fill=guide_legend(title="Median Price")) +
+  theme_void()
+
+plot_median
+  
+```
+
+## Task B3 
+Instead of using median price, you could have been asked to colour-code the mean house price. Would that have given a better view of the house prices across the UK? Please justify your answer.
+
+They will be definitely different. The reason why they are different has to do with how they are distributed. If we look at the quantiles for each of them we see the initial differences. We believe the median is better as it allows a greater amount of details specially when seen using the bins. Given the big outliers we have seen and situations where a low number of observations drive the mean value upward is not as good to determined the most prominent house price values of each area code.
+
+```{r}
+summary(ppdata_agg$mean_price)
+summary(ppdata_agg$median_price)
+```
+We can also appreciate the difference by looking at their log histograms, where it seems small because of the log transformation but it is very significant. The mean will tend to fall into higher valuespulled by those extreme outliers, while the median will maintain a more neutral position.
+
+```{r, fig.width=20,fig.height=10}
+ggplot(ppdata_agg) + 
+  geom_histogram(aes(x=log(mean_price)),bins=100, alpha=0.5, fill='orange') +
+  geom_histogram(aes(x=log(median_price)),bins=100, alpha=0.5, fill='blue') +
+  scale_colour_manual(name = '', values =c('orange'='orange','red'='red'), labels = c('mean','median'), guide='legend')
+```
+We can see below the cloropleths using the median(left) vs the mean(right). For example it is clear how a larger area is marked as high cost when using the mean, which is not necessarily as relevant as it might be driven by fewer observations. 
+
+```{r, fig.width=12,fig.height=5}
+plot_mean = ggplot(uk_map) +
+  ggtitle("UK house mean price (lighter color == lower price)", subtitle = 'by districts') +
+  geom_polygon(aes(x=x, y=y, fill = mean_price_bins , group=group), color = 'gray', size = 0.1) +
+  scale_fill_manual(values = c('yellow1','yellow3', 'orange1','orange2','orange3', 'red1', 'red3','gray')) +
+  coord_quickmap(ylim=c(50.18,55.66),xlim=c(-7.26,2.11)) +
+  theme(legend.position='bottom') +
+  guides(fill=guide_legend(title="Mean Price")) +
+  theme_void()
+
+grid.arrange(plot_median, plot_mean, ncol=2)
+```
+
+## Task C1
+Examine the house prices for 2015. How do these change over time? Do property prices seem to increase or decrease throughout the year?
+
+First we will convert our date to date data type as it is originally in string format.
+
+```{r}
+# Convert to date data type
+ppdata = ppdata %>% mutate(date_of_transfer = as.Date(str_sub(ppdata$date_of_transfer,1,10),format='%Y-%m-%d'))
+head(ppdata)
+```
+
+Then we set limits to the dataset to focus on 2015
+
+```{r}
+# Set date limits
+startDate = as.Date('2015-01-01','%Y-%m-%d')
+endDate = as.Date('2016-01-01','%Y-%m-%d') 
+
+# Subset the original dataset and group by relevant features
+ppdata_ts = ppdata %>% 
+  filter(date_of_transfer>=startDate & date_of_transfer<endDate) %>%
+  group_by(date_of_transfer) %>% 
+  dplyr::summarise(mean_price=mean(price),median_price=median(price), .groups ='keep')
+
+head(ppdata_ts)
+```
+
+And now we can graph the data for that year and check for anomalies by focusing on mean prices first
+
+```{r, fig.width=10}
+ppdata_ts_plot = ggplot(ppdata_ts, aes(x=date_of_transfer, y=mean_price)) +
+  labs(x = 'Date', y = 'Mean(price)', title = 'UK house mean prices by day in 2015') +
+  geom_line(stat = 'summary', fun = 'mean', colour = 'black') +
+  geom_smooth(formula=y~x, method = 'loess', se = FALSE, span = 0.2) +
+  theme(axis.text.x = element_text(angle = -90, vjust = 1, hjust = 0, size=10), legend.position = 'bottom')
+
+ppdata_ts_plot
+```
+
+We see a huge spike on the mean price on December 29, 2015. It would be interesting to know why the mean is so high on that day.
+
+Anyways, at a daily level it is very hard to see any representative seasonality trends on the mean price, so we will aggregate further to month
+
+```{r}
+# aggregate data to month level
+ppdata_ts = ppdata %>%
+  filter(date_of_transfer>=startDate & date_of_transfer<endDate) %>%
+  mutate(year_month = paste0(format(date_of_transfer, '%Y'),format(date_of_transfer, '%m'))) %>%
+  mutate(year_month = as.Date(paste0(year_month,'01'),'%Y%m%d')) %>%
+  group_by(year_month) %>%
+  summarise(mean_price = mean(price), median_price = median(price), n=n(), .groups='keep')
+```
+
+
+```{r}
+# preview monthly data aggregation
+ppdata_ts
+```
+
+
+```{r, fig.width=10}
+ppdata_ts_plot = ggplot(ppdata_ts) +
+  labs(x = 'Date', y = 'Sales operations', title = 'UK house sales operations by month in 2015') +
+  geom_bar(aes(x=year_month, y=n),stat='identity') +
+  theme(axis.text.x = element_text(angle = -90, vjust = 1, hjust = 0, size=10), legend.position = 'bottom') +
+  geom_text(aes(y = 200, label = paste0("n = ", n), x=year_month), size=2) +
+  scale_y_continuous(labels=comma)
+
+ppdata_ts_plot
+```
+
+
+```{r, fig.width=10}
+ppdata_ts_plot = ggplot(ppdata_ts) +
+  labs(x = 'Date', y = 'Mean(price) and Median(price)', title = 'UK house mean and median prices by month in 2015') +
+  geom_line(aes(x=year_month,y=mean_price, colour = 'orange')) +
+  geom_line(aes(x=year_month,y=median_price, colour = 'red'), ) +
+  scale_colour_manual(name = '', values =c('orange'='orange','red'='red'), labels = c('mean','median'), guide='legend') +
+  theme(axis.text.x = element_text(angle = -90, vjust = 1, hjust = 0, size=10), legend.position='bottom') +
+  scale_y_continuous(labels=comma)
+
+ppdata_ts_plot
+```
+
+There are no obvious anomalies by looking at the mean and median price data at the month level. Same case when looking at the amount of cases per month. So let's go back and revisit the peak we had for December 29, 2015.
+
+```{r, fig.width=10}
+# Set date limits
+startDate = as.Date('2015-12-29','%Y-%m-%d')
+endDate = as.Date('2015-12-30','%Y-%m-%d') 
+
+# Subset the original dataset and group by relevant features
+ppdata_ts = ppdata %>% 
+  filter(date_of_transfer>=startDate & date_of_transfer<endDate)
+
+ppdata_ts_plot = ggplot(ppdata_ts, aes(x=district, y=price)) +
+  labs(x = 'District', y = 'Mean(price)', title = 'UK house mean prices by district on 2015-DEC-29') +
+  geom_bar(stat = 'summary', fun = 'mean', colour = 'black') +
+  theme(axis.text.x = element_text(angle = -90, vjust = 1, hjust = 0, size=7), legend.position = 'bottom') +
+  scale_y_continuous(labels = comma)
+  
+ppdata_ts_plot
+```
+
+There seems to be a 20 million sale on a specific district, let's analyze the data further
+
+```{r}
+ppdata_ts = ppdata %>% 
+  filter(date_of_transfer>=startDate & date_of_transfer<endDate & district == 'SOUTH GLOUCESTERSHIRE')
+
+ppdata_ts
+```
+
+So there is only one house price on that day and district which accounts for the huge spike. Let's locate where this sale happened exactly, along with others above 19 million sales operations.
+
+
+```{r}
+# filter dataset to show only sales operations above 19 million
+uk_lf = ppdata %>% 
+  select(latitude, longitude, price) %>% 
+  filter(price>19000000)
+```
+
+
+```{r}
+# map sales operations above 19 million
+map = uk_lf %>% 
+  leaflet(options =leafletOptions(dragging=FALSE)) %>% 
+  addTiles() %>% 
+  addCircleMarkers(~longitude,~latitude, color='blue') %>%
+  addCircleMarkers(-2.571513, 51.54334,	 color='red')
+
+map
+```
+
+The blue circles mark prices above 19 million, the red one marks the one we analized that happened in December 29, 2015.
+
+## Task C2
+C2. Is there a significant relationship between the price of a property and the time of year it is sold? Does this vary with type of property?
+
+In terms of seasonality let's have a look at the full dataset first using a full temporal graph of the complete dataset (day level time series) and calculating the median and mean price for each date provided.
+
+```{r}
+# create aggregated table by day
+ppdata_dyg = ppdata %>%
+  select(date_of_transfer, price) %>%
+  group_by(date_of_transfer) %>% 
+  dplyr::summarise(mean_price = mean(price), median_price=median(price), .groups='keep')
+
+# transform median price data to time series format to be used with dygraph
+ppdata_dyg=xts(ppdata_dyg[,-1], ppdata_dyg$date_of_transfer)
+```
+
+We will plot the time series for mean and median prices and make some annotations on some relevant data points (day level)
+
+```{r}
+ppdata_dyg_plot = dygraph(data=ppdata_dyg, main = 'House mean and median price in the UK', xlab='Date', ylab='Price') %>%
+  dySeries("mean_price", drawPoints = TRUE, pointShape = "square", color = "blue") %>%
+  dyAnnotation("2015-12-29", text = "spike 2015", tooltip = "case reviewed in exercise") %>%
+  dyAnnotation("2014-08-02", text = "biggest mean", tooltip = "biggest mean") %>%
+  dySeries("median_price", drawPoints = TRUE, pointShape = "square", color = "green") %>%
+  dyAnnotation("2011-06-26", text = "biggest meadian", tooltip = "biggest median") %>%
+  dyRangeSelector() %>%
+  dyAxis('x', label = "Date") %>%
+  dyAxis('y', axisLabelFormatter='function(v){return (v).toFixed(0)}') %>%
+  dyOptions(axisLabelFontSize=10, fillGraph = FALSE, fillAlpha=0.1, drawPoints=TRUE)
+
+ppdata_dyg_plot
+```
+
+With those big outliers on the mean price it is hard to appreciate so let's clip the outliers. We will clip out any house mean price above 4 million for the purpose of this exercise.
+
+
+```{r}
+# filter out any mean price above 4 million
+ppdata_dyg = ppdata %>%
+  select(date_of_transfer, price) %>%
+  filter(price < 4000000) %>%
+  group_by(date_of_transfer) %>% 
+  dplyr::summarise(mean_price=mean(price), median_price = median(price), .groups='keep')
+
+# transform to time series
+ppdata_dyg=xts(ppdata_dyg[,-1], ppdata_dyg$date_of_transfer)
+
+ppdata_dyg_plot = dygraph(data=ppdata_dyg, main = 'House mean and median price in the UK', xlab='Date', ylab='Price') %>%
+  dySeries("mean_price", drawPoints = TRUE, pointShape = "square", color = "blue") %>%
+  dySeries("median_price", drawPoints = TRUE, pointShape = "square", color = "green") %>%
+  dyRangeSelector() %>%
+  dyAxis('x', label = "Date") %>%
+  dyAxis('y', axisLabelFormatter='function(v){return (v).toFixed(0)}') %>%
+  dyOptions(axisLabelFontSize=10, fillGraph = FALSE, fillAlpha=0.1, drawPoints=TRUE)
+ppdata_dyg_plot
+```
+
+And let's finally see if the log version of the median and mean can give us any additional insight.
+
+```{r}
+# aggregate log mean and median at day level
+ppdata_dyg = ppdata %>%
+  select(date_of_transfer, price) %>%
+  group_by(date_of_transfer) %>% 
+  dplyr::summarise(mean_price = mean(log(price)), median_price = median(log(price)), .groups='keep')
+
+# transform to time series
+ppdata_dyg=xts(ppdata_dyg[,-1], ppdata_dyg$date_of_transfer)
+
+ppdata_dyg_plot = dygraph(data=ppdata_dyg, main = 'House price in the UK', xlab='Date', ylab='Price') %>%
+  dySeries("mean_price", drawPoints = TRUE, pointShape = "square", color = "blue") %>%
+  dySeries("median_price", drawPoints = TRUE, pointShape = "square", color = "green") %>%
+  dyRangeSelector() %>%
+  dyAnnotation('2015-12-29', text = 'Spike', tooltip = 'The case we spotted in 2015') %>%
+  dyAxis('x', label = "Date") %>%
+  dyAxis('y', axisLabelFormatter='function(v){return (v).toFixed(0)}') %>%
+  dyOptions(axisLabelFontSize=10, fillGraph = FALSE, fillAlpha=0.1, drawPoints=TRUE)
+ppdata_dyg_plot
+```
+
+The logs of mean and median prices is definitely not very insightful. We will keep the original clipped version of the mean and median values. 
+
+However, even in that graph, there is no seasonality on the house prices that can be clearly observed at day level, but maybe this is due having too many data points, let's see the results if we aggregate by month and we graph again with ggplot and dygraph
+
+```{r, fig.width=10}
+ppdata_ts = ppdata %>%
+  mutate(year_month = paste0(format(date_of_transfer, '%Y'),format(date_of_transfer, '%m'))) %>%
+  mutate(year_month = as.Date(paste0(year_month,'01'),'%Y%m%d')) %>%
+  group_by(year_month) %>%
+  summarise(mean_price = mean(price), median_price=median(price), .groups='keep')
+
+ppdata_ts_plot = ggplot(ppdata_ts, aes(x=year_month)) +
+  labs(x = 'Month', y = 'Mean and median price', title = 'UK house mean and median prices by month') +
+  geom_line(aes(x=year_month, y=mean_price), colour = 'blue') +
+  geom_line(aes(x=year_month, y=median_price), colour = 'green') +
+  geom_smooth(aes(x=year_month, y=mean_price, color='blue3'), formula=y~x, method = 'loess', se = FALSE, span = 0.2) +
+  geom_smooth(aes(x=year_month, y=median_price, color='green3'), formula=y~x, method = 'loess', se = FALSE, span = 0.2) +
+  scale_colour_manual(name = '', values =c('blue3'='blue3','green3'='green3'), labels = c('mean','median'), guide='legend') +
+  theme(axis.text.x = element_text(angle = -90, vjust = 1, hjust = 0, size=8), legend.position = 'bottom') +
+  scale_y_continuous(labels=comma) +
+  scale_x_date(date_breaks='1 year')
+  
+ppdata_ts_plot
+```
+
+By looking at the mean and median prices at month level the uptrend is more clear, but there is not much of a seasonality in the data either. Or at least no easily spotted at first sight. 
+
+Let's look not at price but at sales operations per month.
+
+```{r, fig.width=10}
+# aggregate count data to month level
+ppdata_ts = ppdata %>%
+  mutate(year_month = paste0(format(date_of_transfer, '%Y'),format(date_of_transfer, '%m'))) %>%
+  mutate(year_month = as.Date(paste0(year_month,'01'),'%Y%m%d')) %>%
+  group_by(year_month) %>%
+  summarise(price = mean(price),n=n(), .groups='keep')
+
+ppdata_ts_plot = ggplot(ppdata_ts, aes(x=year_month, y=n)) +
+  labs(x = 'Month', y = 'Sales operations', title = 'UK house sales operations per month') +
+  geom_line(aes(x=year_month, y=n),colour = 'black') +
+  geom_smooth(formula=y~x, method = 'loess', se = FALSE, span = 0.2) +
+  theme(axis.text.x = element_text(angle = -90, vjust = 1, hjust = 0, size=8)) +
+  scale_y_continuous(labels=comma) +
+  scale_x_date(date_breaks='1 year')
+  
+ppdata_ts_plot
+```
+
+But when we look at the number of transactions there is definitely a repetition pattern, which seem to indicate that house price operations drop at the beginning of each year.
+
+In terms of property type we have the following values: D = Detached, S = Semi-Detached, T = Terraced, F = Flats/Maisonettes, O = Other. Let's see if any of those are correlated to house price. We will also use in our analysis the feature old_new which indicates if the house was old or new as its name indicates.
+
+```{r}
+# print out the unique values for the property type dimension
+unique(ppdata$property_type)
+```
+
+```{r, fig.width=10}
+# apply new frienly names to property types
+ppdata_new = ppdata %>%
+    mutate(property_type_new = case_when(
+      property_type == 'D' ~ 'Detached',
+      property_type == 'S' ~ 'Semi-Detached',
+      property_type == 'T' ~ 'Terraced',
+      property_type == 'F' ~ 'Flats/Maisonettes',
+      property_type == 'O' ~ 'Other',
+      TRUE ~ 'NA'))
+
+# Add count of observations per district
+ppdata_count = ppdata_new %>% 
+  group_by(property_type_new, old_new) %>% 
+  dplyr::summarize(n=n(), mean_price=mean(price), median_price=median(price), .groups='keep')
+```
+
+```{r, fig.width=10}
+ppdata_ts_plot = ggplot(data=ppdata_new, aes(x=old_new, y=price, color=old_new)) +
+  labs(x = 'Property type', y = 'Mean price', title = 'UK house mean price by property type', color='Is property new?') +
+  geom_jitter( size = 1, alpha=0.1) + 
+  theme(axis.text.x = element_text(vjust = 1, hjust = 0), legend.position = 'bottom') +
+  scale_y_log10(labels = comma, limits = c(100,1e8)) +
+  facet_wrap(~property_type_new, drop=FALSE, nrow=1, ncol=5)
+
+ppdata_ts_plot
+```
+
+Based on the graph above we can see that the property log price seems to only be higher than the rest for the classification "Other", which at the same time has a much higher amount of operations for established residential buildings (not new). The rest of property types do not seem to drive a considerable difference in price from a visual assessment.
+
