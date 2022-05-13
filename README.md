@@ -1,2 +1,2 @@
 # Advanced Visualization in R
-Final project for advanced visualization
+A complete tour of visualization tools in R, including basic graphs, time-series and geomaps
